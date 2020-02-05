@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::path::Path;
 use std::collections::HashMap;
 
-use crate::scene::{Scene, Traverse, Mesh, Material, CameraType, LightType};
+use crate::scene::{Scene, NodeTree, NodeId, Node, Mesh, Material, CameraType, LightType};
 use crate::renderer::{Display, ShaderGeometry, Camera, Light};
 use crate::query3d::{GeometryQuery, GeometryFilter, CameraQuery, LightQuery};
 
@@ -12,6 +12,7 @@ use super::{QueryBackend, QueryError};
 #[derive(Debug)]
 pub struct GltfFile {
     default_scene: usize,
+    nodes: Arc<NodeTree>,
     scenes: Vec<Arc<Scene>>,
     /// Cache the geometry of the entire scene, referenced by scene index
     scene_shader_geometry: HashMap<usize, Arc<Vec<Arc<ShaderGeometry>>>>,
@@ -41,8 +42,15 @@ impl GltfFile {
             lights.map(|light| Arc::new(LightType::from(light))).collect()
         }).unwrap_or_default();
 
+        let nodes = document.nodes().map(|node| {
+            let children = node.children().map(|node| NodeId::from_gltf(&node)).collect();
+            let node = Node::from_gltf(node, &meshes, &cameras, &lights);
+            (node, children)
+        });
+        let nodes = Arc::new(NodeTree::from_ordered_nodes(nodes));
+
         let scenes: Vec<_> = document.scenes()
-            .map(|scene| Arc::new(Scene::from_gltf(scene, &meshes, &cameras, &lights)))
+            .map(|scene| Arc::new(Scene::from_gltf(scene)))
             .collect();
         assert!(!scenes.is_empty(), "glTF file must have at least one scene");
 
@@ -51,6 +59,7 @@ impl GltfFile {
 
         Ok(Self {
             default_scene,
+            nodes,
             scenes,
             scene_shader_geometry: HashMap::new(),
             scene_lights: HashMap::new(),
@@ -82,7 +91,7 @@ impl QueryBackend for GltfFile {
                 let scene = &self.scenes[scene_index];
 
                 let mut scene_geo = Vec::new();
-                for (parent_trans, node) in scene.roots.iter().flat_map(|root| root.traverse()) {
+                for (parent_trans, node) in scene.roots.iter().flat_map(|&root| self.nodes.traverse(root)) {
                     let model_transform = parent_trans * node.transform;
 
                     if let Some(mesh) = node.mesh() {
@@ -119,7 +128,7 @@ impl QueryBackend for GltfFile {
             None => {
                 let scene = &self.scenes[scene_index];
 
-                let mut nodes = scene.roots.iter().flat_map(|root| root.traverse());
+                let mut nodes = scene.roots.iter().flat_map(|&root| self.nodes.traverse(root));
                 let scene_first_camera = nodes.find_map(|(parent_trans, node)| {
                     let world_transform = parent_trans * node.transform;
 
@@ -161,7 +170,7 @@ impl QueryBackend for GltfFile {
                 let scene = &self.scenes[scene_index];
 
                 let mut scene_lights = Vec::new();
-                for (parent_trans, node) in scene.roots.iter().flat_map(|root| root.traverse()) {
+                for (parent_trans, node) in scene.roots.iter().flat_map(|&root| self.nodes.traverse(root)) {
                     let world_transform = parent_trans * node.transform;
 
                     if let Some(light) = node.light() {
